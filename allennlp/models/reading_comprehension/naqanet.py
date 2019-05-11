@@ -46,7 +46,8 @@ class NumericallyAugmentedQaNet(Model):
 
         if answering_abilities is None:
             self.answering_abilities = ["passage_span_extraction", "question_span_extraction",
-                                        "addition_subtraction", "counting"]
+                                        "addition_subtraction", "counting"] # "A_sub_B", "A_plus_B"
+
         else:
             self.answering_abilities = answering_abilities
 
@@ -114,7 +115,31 @@ class NumericallyAugmentedQaNet(Model):
                                                                    Activation.by_name('linear')()],
                                                       hidden_dims=[modeling_out_dim, 3],
                                                       num_layers=2)
+        if "A_sub_B" in self.answering_abilities:
+            self._A_sub_B_index = self.answering_abilities.index("A_sub_B")
+            self._A_sub_B_A = FeedForward(modeling_out_dim * 3,
+                                          activations=[Activation.by_name('relu')(),
+                                                       Activation.by_name('linear')()],
+                                          hidden_dims=[modeling_out_dim, 1],
+                                          num_layers=2)
+            self._A_sub_B_B = FeedForward(modeling_out_dim * 3,
+                                          activations=[Activation.by_name('relu')(),
+                                                       Activation.by_name('linear')()],
+                                          hidden_dims=[modeling_out_dim, 1],
+                                          num_layers=2)
 
+        if "A_plus_B" in self.answering_abilities:
+            self._A_plus_B_index = self.answering_abilities.index("A_plus_B")
+            self._A_plus_B_A = FeedForward(modeling_out_dim * 3,
+                                           activations=[Activation.by_name('relu')(),
+                                                        Activation.by_name('linear')()],
+                                           hidden_dims=[modeling_out_dim, 1],
+                                           num_layers=2)
+            self._A_plus_B_B = FeedForward(modeling_out_dim * 3,
+                                           activations=[Activation.by_name('relu')(),
+                                                        Activation.by_name('linear')()],
+                                           hidden_dims=[modeling_out_dim, 1],
+                                           num_layers=2)
         if "counting" in self.answering_abilities:
             self._counting_index = self.answering_abilities.index("counting")
             self._count_number_predictor = FeedForward(modeling_out_dim,
@@ -276,7 +301,7 @@ class NumericallyAugmentedQaNet(Model):
             if len(self.answering_abilities) > 1:
                 best_question_span_log_prob += answer_ability_log_probs[:, self._question_span_extraction_index]
 
-        if "addition_subtraction" in self.answering_abilities:
+        if any( ability in self.answering_abilities for ability in ["addition_subtraction", "A_sub_B", "A_plus_B"] ):
             # Shape: (batch_size, # of numbers in the passage)
             number_indices = number_indices.squeeze(-1)
             number_mask = (number_indices != -1).long()
@@ -291,6 +316,8 @@ class NumericallyAugmentedQaNet(Model):
             encoded_numbers = torch.cat(
                     [encoded_numbers, passage_vector.unsqueeze(1).repeat(1, encoded_numbers.size(1), 1)], -1)
 
+
+        if "addition_subtraction" in self.answering_abilities:
             # Shape: (batch_size, # of numbers in the passage, 3)
             number_sign_logits = self._number_sign_predictor(encoded_numbers)
             number_sign_log_probs = torch.nn.functional.log_softmax(number_sign_logits, -1)
@@ -311,6 +338,64 @@ class NumericallyAugmentedQaNet(Model):
             if len(self.answering_abilities) > 1:
                 best_combination_log_prob += answer_ability_log_probs[:, self._addition_subtraction_index]
 
+        if "A_sub_B" in self.answering_abilities:
+            # Shape: (batch_size, # of numbers in the passage)
+            A_logits = self._A_sub_B_A(encoded_numbers).squeeze(-1)
+            A_logits = util.replace_masked_values(A_logits, number_mask, -1e7)
+            sub_A_log_probs = torch.nn.functional.log_softmax(A_logits, -1)
+
+            # Shape: (batch_size). can set keepdim=True if shape neds to be (batch_size, 1)
+            best_sub_A_index = torch.argmax(sub_A_log_probs, -1)
+
+            # Shape: (batch_size)
+            best_A_log_probs = torch.gather(
+                    sub_A_log_probs, 1, best_sub_A_index.unsqueeze(-1)).squeeze(-1)
+
+            # Shape: (batch_size, # of numbers in the passage)
+            B_logits = self._A_sub_B_B(encoded_numbers).squeeze(-1)
+            B_logits = util.replace_masked_values(B_logits, number_mask, -1e7)
+            sub_B_log_probs = torch.nn.functional.log_softmax(B_logits, -1)
+
+            # Shape: (batch_size). can set keepdim=True if shape neds to be (batch_size, 1)
+            best_sub_B_index = torch.argmax(sub_B_log_probs, -1)
+
+            # Shape: (batch_size)
+            best_B_log_probs = torch.gather(
+                sub_B_log_probs, 1, best_sub_B_index.unsqueeze(-1)).squeeze(-1)
+
+            best_A_sub_B_log_prob = best_A_log_probs + best_B_log_probs
+            if len(self.answering_abilities) > 1:
+                best_A_sub_B_log_prob += answer_ability_log_probs[:, self._A_sub_B_index]
+
+        if "A_plus_B" in self.answering_abilities:
+
+            # Shape: (batch_size, # of numbers in the passage)
+            A_logits = self._A_plus_B_A(encoded_numbers).squeeze(-1)
+            A_logits = util.replace_masked_values(A_logits, number_mask, -1e7)
+            plus_A_log_probs = torch.nn.functional.log_softmax(A_logits, -1)
+
+            # Shape: (batch_size). can set keepdim=True if shape neds to be (batch_size, 1)
+            best_plus_A_index = torch.argmax(plus_A_log_probs, -1)
+
+            # Shape: (batch_size)
+            best_A_log_probs = torch.gather(
+                    plus_A_log_probs, 1, best_plus_A_index.unsqueeze(-1)).squeeze(-1)
+
+            # Shape: (batch_size, # of numbers in the passage)
+            B_logits = self._A_plus_B_B(encoded_numbers).squeeze(-1)
+            B_logits = util.replace_masked_values(B_logits, number_mask, -1e7)
+            plus_B_log_probs = torch.nn.functional.log_softmax(B_logits, -1)
+
+            # Shape: (batch_size). can set keepdim=True if shape neds to be (batch_size, 1)
+            best_plus_B_index = torch.argmax(plus_B_log_probs, -1)
+
+            # Shape: (batch_size)
+            best_B_log_probs = torch.gather(
+                plus_B_log_probs, 1, best_plus_B_index.unsqueeze(-1)).squeeze(-1)
+
+            best_A_plus_B_log_prob = best_A_log_probs + best_B_log_probs
+            if len(self.answering_abilities) > 1:
+                best_A_plus_B_log_prob += answer_ability_log_probs[:, self._A_plus_B_index]
         output_dict = {}
 
         # If answer is given, compute the loss.
@@ -397,6 +482,54 @@ class NumericallyAugmentedQaNet(Model):
                     log_marginal_likelihood_for_add_sub = util.logsumexp(log_likelihood_for_add_subs)
                     log_marginal_likelihood_list.append(log_marginal_likelihood_for_add_sub)
 
+                elif answering_ability == "A_sub_B":
+                    # The padded add-sub combinations use 0 as the signs for all numbers, and we mask them here.
+
+                    a  = answer_as_add_sub_expressions
+                    A_mask = a==1
+                    B_mask = a==2
+                    # Shape: (batch_size, # of combinations)
+                    A_sub_B_mask = ((A_mask).sum(-1) == 1) & ((B_mask).sum(-1) == 1)
+                    A_sub_B_mask = A_sub_B_mask.float()
+
+                    A_gold_ind = torch.argmax(A_mask,dim =-1)
+                    B_gold_ind = torch.argmax(B_mask, dim=-1)
+
+                    #Shape: (batch_size, #combinations)
+                    log_likelihood_for_A_sub_B_combinations = \
+                        torch.gather(sub_A_log_probs, 1, A_gold_ind)+ torch.gather(sub_B_log_probs, 1, B_gold_ind)
+
+                    log_likelihood_for_A_sub_B = \
+                        util.replace_masked_values(log_likelihood_for_A_sub_B_combinations, A_sub_B_mask, -1e7)
+                    # Shape: (batch_size, )
+                    log_marginal_likelihood_for_A_sub_B = util.logsumexp(log_likelihood_for_A_sub_B)
+                    log_marginal_likelihood_list.append(log_marginal_likelihood_for_A_sub_B)
+
+                elif answering_ability == "A_plus_B":
+                    # The padded add-sub combinations use 0 as the signs for all numbers, and we mask them here.
+
+                    a = answer_as_add_sub_expressions
+                    A_mask = a == 1
+                    B_mask = a == 2
+                    # Shape: (batch_size, # of combinations)
+                    A_plus_B_mask = ((A_mask).sum(-1) == 2) & ((B_mask).sum(-1) == 0)
+                    A_plus_B_mask = A_plus_B_mask.float()
+
+                    #shape:
+                    A_gold_ind, B_gold_ind = A_mask.topk(2, dim=-1)[1].split(1,dim = -1)
+                    A_gold_ind = A_gold_ind.squeeze(-1)
+                    B_gold_ind = B_gold_ind.squeeze(-1)
+
+                    # Shape: (batch_size, #combinations)
+                    log_likelihood_for_A_plus_B_combinations = \
+                        torch.gather(plus_A_log_probs, 1, A_gold_ind) + torch.gather(plus_B_log_probs, 1, B_gold_ind)
+
+                    log_likelihood_for_A_plus_B = \
+                        util.replace_masked_values(log_likelihood_for_A_plus_B_combinations, A_plus_B_mask, -1e7)
+                    # Shape: (batch_size, )
+                    log_marginal_likelihood_for_A_plus_B = util.logsumexp(log_likelihood_for_A_plus_B)
+                    log_marginal_likelihood_list.append(log_marginal_likelihood_for_A_plus_B)
+
                 elif answering_ability == "counting":
                     # Count answers are padded with label -1,
                     # so we clamp those paddings to 0 and then mask after `torch.gather()`.
@@ -464,7 +597,7 @@ class NumericallyAugmentedQaNet(Model):
                     answer_json["value"] = predicted_answer
                     answer_json["spans"] = [(start_offset, end_offset)]
                 elif predicted_ability_str == "addition_subtraction":  # plus_minus combination answer
-                    answer_json["answer_type"] = "arithmetic"
+                    answer_json["answer_type"] = "arithmetic_add_sub"
                     original_numbers = metadata[i]['original_numbers']
                     sign_remap = {0: 0, 1: 1, 2: -1}
                     predicted_signs = [sign_remap[it] for it in best_signs_for_numbers[i].detach().cpu().numpy()]
@@ -475,6 +608,54 @@ class NumericallyAugmentedQaNet(Model):
                     number_positions = [offsets[index] for index in number_indices]
                     answer_json['numbers'] = []
                     for offset, value, sign in zip(number_positions, original_numbers, predicted_signs):
+                        answer_json['numbers'].append({'span': offset, 'value': value, 'sign': sign})
+                    if number_indices[-1] == -1:
+                        # There is a dummy 0 number at position -1 added in some cases; we are
+                        # removing that here.
+                        answer_json["numbers"].pop()
+                    answer_json["value"] = result
+                elif predicted_ability_str == "A_sub_B":  # plus_minus combination answer
+                    answer_json["answer_type"] = "arithmetic_A_sub_B"
+                    original_numbers = metadata[i]['original_numbers']
+                    a_ind = best_sub_A_index[i].detach().cpu()
+                    b_ind = best_sub_B_index[i].detach().cpu()
+                    result = original_numbers[a_ind]- original_numbers[b_ind]
+                    predicted_answer = str(result)
+                    offsets = metadata[i]['passage_token_offsets']
+                    number_indices = metadata[i]['number_indices']
+                    number_positions = [offsets[index] for index in number_indices]
+                    answer_json['numbers'] = []
+                    for n_ind, (offset, value) in enumerate(zip(number_positions, original_numbers)):
+                        if n_ind == a_ind:
+                            sign = 1
+                        elif n_ind == b_ind:
+                            sign = -1
+                        else:
+                            sign = 0
+                        answer_json['numbers'].append({'span': offset, 'value': value, 'sign': sign})
+                    if number_indices[-1] == -1:
+                        # There is a dummy 0 number at position -1 added in some cases; we are
+                        # removing that here.
+                        answer_json["numbers"].pop()
+                    answer_json["value"] = result
+                elif predicted_ability_str == "A_plus_B":  # plus_minus combination answer
+                    answer_json["answer_type"] = "arithmetic_A_plus_B"
+                    original_numbers = metadata[i]['original_numbers']
+                    a_ind = best_plus_A_index[i].detach().cpu()
+                    b_ind = best_plus_B_index[i].detach().cpu()
+                    result = original_numbers[a_ind] + original_numbers[b_ind]
+                    predicted_answer = str(result)
+                    offsets = metadata[i]['passage_token_offsets']
+                    number_indices = metadata[i]['number_indices']
+                    number_positions = [offsets[index] for index in number_indices]
+                    answer_json['numbers'] = []
+                    for n_ind, (offset, value) in enumerate(zip(number_positions, original_numbers)):
+                        if n_ind == a_ind:
+                            sign = 1
+                        elif n_ind == b_ind:
+                            sign = 1
+                        else:
+                            sign = 0
                         answer_json['numbers'].append({'span': offset, 'value': value, 'sign': sign})
                     if number_indices[-1] == -1:
                         # There is a dummy 0 number at position -1 added in some cases; we are
