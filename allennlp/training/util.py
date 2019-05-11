@@ -304,8 +304,8 @@ def create_serialization_dir(
                                          "recovering from.")
     else:
         if recover:
-            raise ConfigurationError(f"--recover specified but serialization_dir ({serialization_dir}) "
-                                     "does not exist.  There is nothing to recover from.")
+            logger.warning(f"--recover specified but serialization_dir ({serialization_dir}) "
+                                     "does not exist.  Creating the folder.")
         os.makedirs(serialization_dir, exist_ok=True)
 
 def data_parallel(batch_group: List[TensorDict],
